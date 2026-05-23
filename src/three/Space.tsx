@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { Canvas, extend, ReactThreeFiber, useThree } from "@react-three/fiber";
+import { useEffect, useRef, useMemo, useState } from "react";
+import { Canvas, useThree } from "@react-three/fiber";
 import { useAreaStore } from "@/state/areaStore";
-import { Html, Sky, Environment, Line } from "@react-three/drei";
+import { Html, Sky, Environment } from "@react-three/drei";
 import * as THREE from "three";
 import { useActionStore } from "@/state/exportStore";
 import { GLTFExporter } from "three/examples/jsm/Addons.js";
@@ -9,6 +9,11 @@ import Car from "./Car";
 import instanceFleet from "@/api/axios";
 
 const scale = 51000;
+
+const ROAD_MAT = new THREE.MeshStandardMaterial({ color: "#3d3d3d" });
+const PATH_MAT = new THREE.MeshStandardMaterial({ color: "#888888" });
+const BUILDING_MAT = new THREE.MeshStandardMaterial({ color: "#9da0a3" });
+const BUILDING_ACTIVE_MAT = new THREE.MeshStandardMaterial({ color: "#007bff" });
 
 function Building({
   shape,
@@ -43,10 +48,10 @@ function Building({
         e.stopPropagation();
       }}
       rotation={[-Math.PI / 2, 0, 0]}
+      material={hovered || clicked ? BUILDING_ACTIVE_MAT : BUILDING_MAT}
       userData={{ exportToGLB: true }}
     >
       <extrudeGeometry args={[shape, extrudeSettings]} />
-      <meshStandardMaterial color={hovered || clicked ? "#007bff" : "#9da0a3"} />
       {(hovered || clicked) && hoverPos && (
         <Html position={[hoverPos.x, hoverPos.y + extrudeSettings.depth + 0.5, hoverPos.z]} center>
           <div
@@ -312,57 +317,215 @@ function Building({
   );
 }
 
-function Roads({ area }: { area: any }) {
-  const [roads, setRoads] = useState<any[]>([]);
-  if (!area || area.length < 2) return null;
-  const refLat = (area[1].lat + area[0].lat) / 2;
-  const refLng = (area[1].lng + area[0].lng) / 2;
+// Highway types rendered as pedestrian paths (lighter material, narrower).
+const PEDESTRIAN_TYPES = new Set([
+  "footway", "path", "steps", "pedestrian", "track", "cycleway",
+]);
 
-  function project(lat: number, lng: number) {
-    const x = (lng - refLng) * scale * Math.cos((refLat * Math.PI) / 180);
-    const y = (lat - refLat) * scale;
-    return new THREE.Vector2(x, y);
+// Half-widths in scene units (1 unit ≈ 2 m at mid-latitudes).
+// Keyed by OSM highway tag value.
+const ROAD_HALF_WIDTH: Record<string, number> = {
+  motorway: 4.5,
+  motorway_link: 2.5,
+  trunk: 3.5,
+  trunk_link: 2.0,
+  primary: 3.0,
+  primary_link: 2.0,
+  secondary: 2.5,
+  secondary_link: 1.8,
+  tertiary: 2.0,
+  tertiary_link: 1.5,
+  residential: 1.8,
+  living_street: 1.6,
+  unclassified: 1.8,
+  service: 1.2,
+  // Pedestrian / non-vehicle — narrow
+  pedestrian: 0.5,
+  footway: 0.4,
+  cycleway: 0.4,
+  path: 0.35,
+  track: 0.45,
+  steps: 0.3,
+};
+const DEFAULT_ROAD_HALF_WIDTH = 1.5;
+
+// Build a flat ribbon THREE.Shape from a projected 2-D polyline.
+// Returns null if the polyline is degenerate.
+function buildRoadShape(pts: THREE.Vector2[], halfW: number): THREE.Shape | null {
+  const left: THREE.Vector2[] = [];
+  const right: THREE.Vector2[] = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    // Perpendicular unit vector (90° CCW)
+    const nx = (-dy / len) * halfW;
+    const ny = (dx / len) * halfW;
+
+    if (left.length === 0) {
+      left.push(new THREE.Vector2(a.x + nx, a.y + ny));
+      right.push(new THREE.Vector2(a.x - nx, a.y - ny));
+    }
+    left.push(new THREE.Vector2(b.x + nx, b.y + ny));
+    right.push(new THREE.Vector2(b.x - nx, b.y - ny));
   }
 
+  if (left.length < 2) return null;
+
+  const shape = new THREE.Shape();
+  shape.moveTo(left[0].x, left[0].y);
+  for (let i = 1; i < left.length; i++) shape.lineTo(left[i].x, left[i].y);
+  for (let i = right.length - 1; i >= 0; i--) shape.lineTo(right[i].x, right[i].y);
+  shape.closePath();
+  return shape;
+}
+
+const ROAD_EXTRUDE = { steps: 1, depth: 0.1, bevelEnabled: false } as const;
+
+// ── Polyline clipping ─────────────────────────────────────────────────────────
+
+/**
+ * Liang-Barsky parametric segment clip against an axis-aligned rectangle.
+ * Works in any 2-D coordinate system (lat/lon here).
+ * Returns [x0,y0, x1,y1] of the clipped segment, or null if fully outside.
+ */
+function clipSegment(
+  x0: number, y0: number,
+  x1: number, y1: number,
+  xmin: number, ymin: number,
+  xmax: number, ymax: number
+): [number, number, number, number] | null {
+  let t0 = 0, t1 = 1;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+
+  const clip = (p: number, q: number): boolean => {
+    if (p === 0) return q >= 0;        // parallel edge — outside if q < 0
+    const r = q / p;
+    if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+    else       { if (r < t0) return false; if (r < t1) t1 = r; }
+    return true;
+  };
+
+  if (
+    !clip(-dx, x0 - xmin) ||
+    !clip( dx, xmax - x0) ||
+    !clip(-dy, y0 - ymin) ||
+    !clip( dy, ymax - y0)
+  ) return null;
+
+  return [x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy];
+}
+
+type LatLon = { lat: number; lon: number };
+
+/**
+ * Clips a lat/lon polyline to the given bounding box.
+ * Returns one or more contiguous sub-polylines (a road crossing a bbox corner
+ * may produce two separate segments).
+ */
+function clipPolylineToBbox(
+  pts: LatLon[],
+  minLat: number, maxLat: number,
+  minLng: number, maxLng: number
+): LatLon[][] {
+  const result: LatLon[][] = [];
+  let current: LatLon[] = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i];
+    const p1 = pts[i + 1];
+    const seg = clipSegment(
+      p0.lon, p0.lat, p1.lon, p1.lat,
+      minLng, minLat, maxLng, maxLat
+    );
+    if (!seg) {
+      if (current.length >= 2) result.push(current);
+      current = [];
+      continue;
+    }
+    const [x0, y0, x1, y1] = seg;
+    const cp0: LatLon = { lat: y0, lon: x0 };
+    const cp1: LatLon = { lat: y1, lon: x1 };
+
+    if (current.length === 0) {
+      current.push(cp0, cp1);
+    } else {
+      const last = current[current.length - 1];
+      // If the clipped start equals the last accumulated point, extend;
+      // otherwise the segment was clipped at entry — start a new chain.
+      if (Math.abs(last.lat - cp0.lat) < 1e-10 && Math.abs(last.lon - cp0.lon) < 1e-10) {
+        current.push(cp1);
+      } else {
+        result.push(current);
+        current = [cp0, cp1];
+      }
+    }
+  }
+  if (current.length >= 2) result.push(current);
+  return result;
+}
+
+function RoadMesh({ shape, material }: { shape: THREE.Shape; material: THREE.MeshStandardMaterial }) {
+  const meshRef = useRef<THREE.Mesh>(null!);
   useEffect(() => {
-    const south = area[1].lat;
-    const west = area[1].lng;
-    const north = area[0].lat;
-    const east = area[0].lng;
-    const query = `[out:json][timeout:25];(way["highway"](${south},${west},${north},${east}););out body geom;`;
-    fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST",
-      body: query,
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    })
-      .then((response) => response.json())
-      .then((data) => {
-        setRoads(data.elements);
-      })
-      .catch((err) => console.error(err));
-  }, [area]);
+    meshRef.current.userData.exportToGLB = true;
+  }, []);
+  return (
+    <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]} material={material}>
+      <extrudeGeometry args={[shape, ROAD_EXTRUDE]} />
+    </mesh>
+  );
+}
+
+function RoadMeshes() {
+  const roads = useAreaStore((state) => state.roads);
+  const center = useAreaStore((state) => state.center);
+
+  const refLat = (center[1].lat + center[0].lat) / 2;
+  const refLng = (center[1].lng + center[0].lng) / 2;
+
+  // Bounding box in lat/lon — center[0] is NE, center[1] is SW
+  const minLat = Math.min(center[0].lat, center[1].lat);
+  const maxLat = Math.max(center[0].lat, center[1].lat);
+  const minLng = Math.min(center[0].lng, center[1].lng);
+  const maxLng = Math.max(center[0].lng, center[1].lng);
+
+  const roadShapes = useMemo(() => {
+    return roads.flatMap((road, i) => {
+      if (!road.geometry || road.geometry.length < 2) return [];
+      const highwayType: string = road.tags?.highway ?? "";
+      const halfW = ROAD_HALF_WIDTH[highwayType] ?? DEFAULT_ROAD_HALF_WIDTH;
+      const material = PEDESTRIAN_TYPES.has(highwayType) ? PATH_MAT : ROAD_MAT;
+
+      // Clip the polyline to the selection bbox before projecting
+      const clippedChains = clipPolylineToBbox(
+        road.geometry as LatLon[],
+        minLat, maxLat, minLng, maxLng
+      );
+
+      return clippedChains.flatMap((chain, ci) => {
+        const pts2d = chain.map((pt) => {
+          const x = (pt.lon - refLng) * scale * Math.cos((refLat * Math.PI) / 180);
+          const y = (pt.lat - refLat) * scale;
+          return new THREE.Vector2(x, y);
+        });
+        const shape = buildRoadShape(pts2d, halfW);
+        if (!shape) return [];
+        return [{ shape, material, key: `${road.id ?? i}-${ci}` }];
+      });
+    });
+  }, [roads, refLat, refLng, minLat, maxLat, minLng, maxLng]);
 
   return (
     <>
-      {roads.map((road, index) => {
-        if (!road.geometry || road.geometry.length < 2) return null;
-
-        const points = road.geometry.map((pt: any) => {
-          const v = project(pt.lat, pt.lon);
-          return new THREE.Vector3(v.x, 0.1, -v.y);
-        });
-
-        const lineGeometry: any = new THREE.BufferGeometry().setFromPoints(points);
-
-        return (
-          <Line
-            points={points}
-            color="#34f516"
-            lineWidth={1}
-            userData={{ exportToGLB: true }}
-          ></Line>
-        );
-      })}
+      {roadShapes.map(({ shape, material, key }) => (
+        <RoadMesh key={key} shape={shape} material={material} />
+      ))}
     </>
   );
 }
@@ -441,7 +604,6 @@ export function Export() {
 
 export function Space() {
   const areas = useAreaStore((state) => state.areas);
-  const [realCenter, setRealCenter] = useState<any>();
   const center = useAreaStore((state) => state.center);
   const refLat = (center[1].lat + center[0].lat) / 2;
   const refLng = (center[1].lng + center[0].lng) / 2;
@@ -452,12 +614,8 @@ export function Space() {
     return new THREE.Vector2(x, y);
   }
 
-  const areaData = () => {
-    const result: Array<{
-      shape: THREE.Shape;
-      extrudeSettings: any;
-      tags: any;
-    }> = [];
+  const buildingsData = useMemo(() => {
+    const result: Array<{ shape: THREE.Shape; extrudeSettings: any; tags: any }> = [];
     areas.forEach((bld: any) => {
       if (!bld.geometry || bld.geometry.length < 3) return;
       const shapePoints = bld.geometry.map((pt: any) => project(pt.lat, pt.lng));
@@ -468,26 +626,16 @@ export function Space() {
       const heightLevels = parseFloat(bld.tags["building:levels"] || "");
       if (isNaN(heightValue)) heightValue = 10;
       if (!isNaN(heightLevels)) heightValue = heightLevels * 2.2;
-      const extrudeSettings = {
-        steps: 1,
-        depth: heightValue,
-        bevelEnabled: false,
-      };
-      result.push({ shape, extrudeSettings, tags: bld.tags });
+      result.push({ shape, extrudeSettings: { steps: 1, depth: heightValue, bevelEnabled: false }, tags: bld.tags });
     });
     return result;
-  };
-
-  useEffect(() => {
-    setRealCenter(center);
-  }, [areas]);
-
-  const buildingsData = areaData();
+  }, [areas, refLat, refLng]);
 
   return (
     <Canvas camera={{ fov: 90, near: 0.1, far: 7000 }}>
       <ambientLight intensity={Math.PI / 2} />
       <spotLight position={[10, 10, 10]} angle={0.15} penumbra={1} decay={0} intensity={Math.PI} />
+      <RoadMeshes />
       {buildingsData.map((item, index) => (
         <Building
           key={index}
@@ -496,8 +644,6 @@ export function Space() {
           tags={item.tags}
         />
       ))}
-
-      <Roads area={realCenter} />
       <pointLight position={[-10, -10, -10]} decay={0} intensity={Math.PI} />
       <Car />
       <Export />

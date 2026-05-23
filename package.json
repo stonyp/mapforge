@@ -17,6 +17,7 @@
     "axios": "^1.7.9",
     "deventds2": "^0.1.10",
     "leaflet": "^1.9.4",
+    "leaflet-rotate": "^0.2.8",
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
