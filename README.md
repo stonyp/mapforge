@@ -1,10 +1,10 @@
 <p align='center'>
-<h1 align='center'>🗺️ map3d</h1>
+<h1 align='center'>🗺️ Mapforge</h1>
 <p align='center'>Generate a real world 3D map</p>
 </p>
 
 <p align='center'>
-<a href="https://map.fleet.im/">Visit Website</a> · <a href="https://github.com/cartesiancs/map3d/issues">Report Bugs</a>
+<a href="">Visit Website</a> · <a href="https://github.com/cartesiancs/map3d/issues">Report Bugs</a>
 </p>
 
 ![img](./.github/screenshot.png)
