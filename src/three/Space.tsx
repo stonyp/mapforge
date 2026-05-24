@@ -8,8 +8,6 @@ import { GLTFExporter } from "three/examples/jsm/Addons.js";
 import Car from "./Car";
 import instanceFleet from "@/api/axios";
 
-const scale = 51000;
-
 const ROAD_MAT = new THREE.MeshStandardMaterial({ color: "#3d3d3d" });
 const PATH_MAT = new THREE.MeshStandardMaterial({ color: "#888888" });
 const BUILDING_MAT = new THREE.MeshStandardMaterial({ color: "#9da0a3" });
@@ -488,42 +486,33 @@ function RoadMesh({ shape, material }: { shape: THREE.Shape; material: THREE.Mes
 
 function RoadMeshes() {
   const roads = useAreaStore((state) => state.roads);
-  const center = useAreaStore((state) => state.center);
-
-  const refLat = (center[1].lat + center[0].lat) / 2;
-  const refLng = (center[1].lng + center[0].lng) / 2;
-
-  // Bounding box in lat/lon — center[0] is NE, center[1] is SW
-  const minLat = Math.min(center[0].lat, center[1].lat);
-  const maxLat = Math.max(center[0].lat, center[1].lat);
-  const minLng = Math.min(center[0].lng, center[1].lng);
-  const maxLng = Math.max(center[0].lng, center[1].lng);
+  const projection = useAreaStore((state) => state.projection);
 
   const roadShapes = useMemo(() => {
+    if (!projection) return [];
+    const { refLat, refLng, scaleX, scaleY, bbox } = projection;
     return roads.flatMap((road, i) => {
       if (!road.geometry || road.geometry.length < 2) return [];
       const highwayType: string = road.tags?.highway ?? "";
       const halfW = ROAD_HALF_WIDTH[highwayType] ?? DEFAULT_ROAD_HALF_WIDTH;
       const material = PEDESTRIAN_TYPES.has(highwayType) ? PATH_MAT : ROAD_MAT;
 
-      // Clip the polyline to the selection bbox before projecting
       const clippedChains = clipPolylineToBbox(
         road.geometry as LatLon[],
-        minLat, maxLat, minLng, maxLng
+        bbox.minLat, bbox.maxLat, bbox.minLng, bbox.maxLng
       );
 
       return clippedChains.flatMap((chain, ci) => {
-        const pts2d = chain.map((pt) => {
-          const x = (pt.lon - refLng) * scale * Math.cos((refLat * Math.PI) / 180);
-          const y = (pt.lat - refLat) * scale;
-          return new THREE.Vector2(x, y);
-        });
+        const pts2d = chain.map((pt) => new THREE.Vector2(
+          (pt.lon - refLng) * scaleX,
+          (pt.lat - refLat) * scaleY,
+        ));
         const shape = buildRoadShape(pts2d, halfW);
         if (!shape) return [];
         return [{ shape, material, key: `${road.id ?? i}-${ci}` }];
       });
     });
-  }, [roads, refLat, refLng, minLat, maxLat, minLng, maxLng]);
+  }, [roads, projection]);
 
   return (
     <>
@@ -645,34 +634,28 @@ export function Export() {
 
 export function Space() {
   const areas = useAreaStore((state) => state.areas);
-  const center = useAreaStore((state) => state.center);
-  const refLat = (center[1].lat + center[0].lat) / 2;
-  const refLng = (center[1].lng + center[0].lng) / 2;
+  const projection = useAreaStore((state) => state.projection);
 
-  // Ground plane dimensions — memoized on center only, never on canvas/viewport state.
-  // This prevents recalculation on canvas resize events (e.g. browser download panel).
+  // Ground plane dimensions — frozen at generation time via projection store.
+  // Never recalculates on canvas/viewport resize.
   const { groundSceneWidth, groundSceneDepth } = useMemo(() => {
-    const minLat = Math.min(center[0].lat, center[1].lat);
-    const maxLat = Math.max(center[0].lat, center[1].lat);
-    const minLng = Math.min(center[0].lng, center[1].lng);
-    const maxLng = Math.max(center[0].lng, center[1].lng);
+    if (!projection) return { groundSceneWidth: 0, groundSceneDepth: 0 };
+    const { bbox, scaleX, scaleY } = projection;
     return {
-      groundSceneWidth: (maxLng - minLng) * scale * Math.cos((refLat * Math.PI) / 180) * 1.2,
-      groundSceneDepth: (maxLat - minLat) * scale * 1.2,
+      groundSceneWidth: (bbox.maxLng - bbox.minLng) * scaleX * 1.2,
+      groundSceneDepth: (bbox.maxLat - bbox.minLat) * scaleY * 1.2,
     };
-  }, [center]);
-
-  function project(lat: number, lng: number) {
-    const x = (lng - refLng) * scale * Math.cos((refLat * Math.PI) / 180);
-    const y = (lat - refLat) * scale;
-    return new THREE.Vector2(x, y);
-  }
+  }, [projection]);
 
   const buildingsData = useMemo(() => {
+    if (!projection) return [];
+    const { refLat, refLng, scaleX, scaleY } = projection;
     const result: Array<{ shape: THREE.Shape; extrudeSettings: any; tags: any }> = [];
     areas.forEach((bld: any) => {
       if (!bld.geometry || bld.geometry.length < 3) return;
-      const shapePoints = bld.geometry.map((pt: any) => project(pt.lat, pt.lng));
+      const shapePoints = bld.geometry.map((pt: any) =>
+        new THREE.Vector2((pt.lng - refLng) * scaleX, (pt.lat - refLat) * scaleY)
+      );
       if (!shapePoints[0].equals(shapePoints[shapePoints.length - 1]))
         shapePoints.push(shapePoints[0]);
       const shape = new THREE.Shape(shapePoints);
@@ -683,7 +666,7 @@ export function Space() {
       result.push({ shape, extrudeSettings: { steps: 1, depth: heightValue, bevelEnabled: false }, tags: bld.tags });
     });
     return result;
-  }, [areas, refLat, refLng]);
+  }, [areas, projection]);
 
   return (
     <Canvas camera={{ fov: 90, near: 0.1, far: 7000 }}>

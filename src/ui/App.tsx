@@ -71,6 +71,7 @@ function App() {
   const setCenter = useAreaStore((state) => state.setCenter);
   const appendAreas = useAreaStore((state) => state.appendAreas);
   const setRoads = useAreaStore((state) => state.setRoads);
+  const setProjection = useAreaStore((state) => state.setProjection);
   const setAction = useActionStore((state) => state.setAction);
   const setFleet = useActionStore((state) => state.setFleet);
   const includeGroundPlane = useActionStore((state) => state.includeGroundPlane);
@@ -188,6 +189,24 @@ function App() {
     const west = areaData[1].lng;
     const north = areaData[0].lat;
     const east = areaData[0].lng;
+
+    // Lock projection parameters at generation time — never recalculated on resize.
+    const SCENE_SCALE = 51000;
+    const refLat = (north + south) / 2;
+    const refLng = (east + west) / 2;
+    setProjection({
+      refLat,
+      refLng,
+      scaleX: SCENE_SCALE * Math.cos((refLat * Math.PI) / 180),
+      scaleY: SCENE_SCALE,
+      bbox: {
+        minLat: Math.min(south, north),
+        maxLat: Math.max(south, north),
+        minLng: Math.min(west, east),
+        maxLng: Math.max(west, east),
+      },
+    });
+
     const query = `[out:json][timeout:25];(way["building"](${south},${west},${north},${east});relation["building"](${south},${west},${north},${east});way["highway"](${south},${west},${north},${east}););out body geom;`;
     try {
       const response = await fetch("https://overpass-api.de/api/interpreter", {
