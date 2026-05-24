@@ -119,7 +119,7 @@ Open `http://localhost:5173` in your browser.
 
 - Original project: [cartesiancs/map3d](https://github.com/cartesiancs/map3d)
 - Map data: © [OpenStreetMap](https://www.openstreetmap.org/) contributors
-- Built by [AIssacArt](https://x.com/AIssacArt)
+- Built by [stonyp](https://github.com/stonyp)
 
 ---
 
