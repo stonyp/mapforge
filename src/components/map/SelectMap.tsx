@@ -162,6 +162,21 @@ function MapController({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map]);
 
+  // Stabilize the map view against browser-chrome resize events (e.g. download
+  // panel). Capture center+zoom BEFORE invalidateSize so Leaflet's internal
+  // pan compensation doesn't shift the view, then restore them explicitly.
+  useEffect(() => {
+    const container = map.getContainer();
+    const observer = new ResizeObserver(() => {
+      const center = map.getCenter();
+      const zoom = map.getZoom();
+      map.invalidateSize({ animate: false, pan: false } as any);
+      map.setView(center, zoom, { animate: false });
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [map]);
+
   return null;
 }
 
