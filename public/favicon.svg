@@ -1,0 +1,5 @@
+<!-- Placeholder favicon — replace with final Mapforge brand mark -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#007bff"/>
+  <text x="16" y="22" font-size="18" text-anchor="middle" fill="#fff" font-family="system-ui, sans-serif" font-weight="700">M</text>
+</svg>

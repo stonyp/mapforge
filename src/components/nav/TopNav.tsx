@@ -63,7 +63,7 @@ export function TopNav({ step }: { step: number }) {
               color: "#5b5d63",
             })}
           >
-            🗺️ Map3d
+            🗺️ Mapforge
           </span>
         </div>
 
@@ -86,7 +86,7 @@ export function TopNav({ step }: { step: number }) {
         >
           <NavButton
             isShow={true}
-            onClick={() => window.open("https://github.com/cartesiancs/map3d")}
+            onClick={() => window.open("https://github.com/stonyp/mapforge")}
           >
             GitHub
           </NavButton>
@@ -121,6 +121,29 @@ export function TopNav({ step }: { step: number }) {
           <Title>Options </Title>
         </Column>
       </Modal>
+
+      {/* ── Footer ── */}
+      <div
+        css={css({
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          width: "100%",
+          padding: "0.4rem 1.5rem",
+          backgroundColor: "#ffffff50",
+          backdropFilter: "blur(12px)",
+          borderTop: `1px solid ${BORDER_COLOR}`,
+          zIndex: 9999,
+          display: "flex",
+          justifyContent: "flex-end",
+          alignItems: "center",
+          fontSize: "11px",
+          color: "#9aa0a6",
+          pointerEvents: "none",
+        })}
+      >
+        Built by AIssacArt
+      </div>
     </>
   );
 }
