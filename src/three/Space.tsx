@@ -534,11 +534,20 @@ function RoadMeshes() {
   );
 }
 
-// sceneWidth / sceneDepth are computed in Space using the same refLat/refLng
-// as buildings, so the ground plane always shares the same coordinate origin.
+// Stable position — module-level constant so R3F never sees a new array reference.
+const GROUND_POSITION: [number, number, number] = [0, -0.25, 0];
+
+// sceneWidth / sceneDepth are computed in Space via useMemo(…, [center]) so they
+// only change when the user generates a new scene, never on canvas resize.
 function GroundPlane({ sceneWidth, sceneDepth }: { sceneWidth: number; sceneDepth: number }) {
   const meshRef = useRef<THREE.Mesh>(null!);
   const includeGroundPlane = useActionStore((state) => state.includeGroundPlane);
+
+  // Stable args tuple — only a new array when dimensions actually change.
+  const boxArgs = useMemo<[number, number, number]>(
+    () => [sceneWidth, 0.5, sceneDepth],
+    [sceneWidth, sceneDepth]
+  );
 
   useEffect(() => {
     if (!meshRef.current) return;
@@ -548,11 +557,11 @@ function GroundPlane({ sceneWidth, sceneDepth }: { sceneWidth: number; sceneDept
 
   if (!includeGroundPlane) return null;
 
-  // Box sits with its top face at y = 0, flush with building bases.
-  // X = longitudinal span (world X), Z = latitudinal span (world Z after building rotation).
+  // Top face sits at y = 0, flush with building bases.
+  // X = longitudinal span, Z = latitudinal span (world Z after building rotation).
   return (
-    <mesh ref={meshRef} position={[0, -0.25, 0]} material={GROUND_PREVIEW_MAT}>
-      <boxGeometry args={[sceneWidth, 0.5, sceneDepth]} />
+    <mesh ref={meshRef} position={GROUND_POSITION} material={GROUND_PREVIEW_MAT}>
+      <boxGeometry args={boxArgs} />
     </mesh>
   );
 }
@@ -640,14 +649,18 @@ export function Space() {
   const refLat = (center[1].lat + center[0].lat) / 2;
   const refLng = (center[1].lng + center[0].lng) / 2;
 
-  // Ground plane dimensions — derived from the same bbox + projection as buildings.
-  // +10% margin each side (×1.2) so the plane extends slightly beyond the building edges.
-  const minLat = Math.min(center[0].lat, center[1].lat);
-  const maxLat = Math.max(center[0].lat, center[1].lat);
-  const minLng = Math.min(center[0].lng, center[1].lng);
-  const maxLng = Math.max(center[0].lng, center[1].lng);
-  const groundSceneWidth = (maxLng - minLng) * scale * Math.cos((refLat * Math.PI) / 180) * 1.2;
-  const groundSceneDepth = (maxLat - minLat) * scale * 1.2;
+  // Ground plane dimensions — memoized on center only, never on canvas/viewport state.
+  // This prevents recalculation on canvas resize events (e.g. browser download panel).
+  const { groundSceneWidth, groundSceneDepth } = useMemo(() => {
+    const minLat = Math.min(center[0].lat, center[1].lat);
+    const maxLat = Math.max(center[0].lat, center[1].lat);
+    const minLng = Math.min(center[0].lng, center[1].lng);
+    const maxLng = Math.max(center[0].lng, center[1].lng);
+    return {
+      groundSceneWidth: (maxLng - minLng) * scale * Math.cos((refLat * Math.PI) / 180) * 1.2,
+      groundSceneDepth: (maxLat - minLat) * scale * 1.2,
+    };
+  }, [center]);
 
   function project(lat: number, lng: number) {
     const x = (lng - refLng) * scale * Math.cos((refLat * Math.PI) / 180);
