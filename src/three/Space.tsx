@@ -534,20 +534,11 @@ function RoadMeshes() {
   );
 }
 
-function GroundPlane() {
+// sceneWidth / sceneDepth are computed in Space using the same refLat/refLng
+// as buildings, so the ground plane always shares the same coordinate origin.
+function GroundPlane({ sceneWidth, sceneDepth }: { sceneWidth: number; sceneDepth: number }) {
   const meshRef = useRef<THREE.Mesh>(null!);
-  const center = useAreaStore((state) => state.center);
   const includeGroundPlane = useActionStore((state) => state.includeGroundPlane);
-
-  const { width, depth } = useMemo(() => {
-    const refLat = (center[0].lat + center[1].lat) / 2;
-    const dLng = Math.abs(center[0].lng - center[1].lng);
-    const dLat = Math.abs(center[0].lat - center[1].lat);
-    // +10% margin on each side → ×1.2 total
-    const w = dLng * scale * Math.cos((refLat * Math.PI) / 180) * 1.2;
-    const d = dLat * scale * 1.2;
-    return { width: w, depth: d };
-  }, [center]);
 
   useEffect(() => {
     if (!meshRef.current) return;
@@ -557,10 +548,11 @@ function GroundPlane() {
 
   if (!includeGroundPlane) return null;
 
-  // BoxGeometry: width × 0.5 thick × depth, top face sits at y = 0
+  // Box sits with its top face at y = 0, flush with building bases.
+  // X = longitudinal span (world X), Z = latitudinal span (world Z after building rotation).
   return (
     <mesh ref={meshRef} position={[0, -0.25, 0]} material={GROUND_PREVIEW_MAT}>
-      <boxGeometry args={[width, 0.5, depth]} />
+      <boxGeometry args={[sceneWidth, 0.5, sceneDepth]} />
     </mesh>
   );
 }
@@ -648,6 +640,15 @@ export function Space() {
   const refLat = (center[1].lat + center[0].lat) / 2;
   const refLng = (center[1].lng + center[0].lng) / 2;
 
+  // Ground plane dimensions — derived from the same bbox + projection as buildings.
+  // +10% margin each side (×1.2) so the plane extends slightly beyond the building edges.
+  const minLat = Math.min(center[0].lat, center[1].lat);
+  const maxLat = Math.max(center[0].lat, center[1].lat);
+  const minLng = Math.min(center[0].lng, center[1].lng);
+  const maxLng = Math.max(center[0].lng, center[1].lng);
+  const groundSceneWidth = (maxLng - minLng) * scale * Math.cos((refLat * Math.PI) / 180) * 1.2;
+  const groundSceneDepth = (maxLat - minLat) * scale * 1.2;
+
   function project(lat: number, lng: number) {
     const x = (lng - refLng) * scale * Math.cos((refLat * Math.PI) / 180);
     const y = (lat - refLat) * scale;
@@ -675,7 +676,7 @@ export function Space() {
     <Canvas camera={{ fov: 90, near: 0.1, far: 7000 }}>
       <ambientLight intensity={Math.PI / 2} />
       <spotLight position={[10, 10, 10]} angle={0.15} penumbra={1} decay={0} intensity={Math.PI} />
-      <GroundPlane />
+      <GroundPlane sceneWidth={groundSceneWidth} sceneDepth={groundSceneDepth} />
       <RoadMeshes />
       {buildingsData.map((item, index) => (
         <Building
