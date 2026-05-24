@@ -73,6 +73,8 @@ function App() {
   const setRoads = useAreaStore((state) => state.setRoads);
   const setAction = useActionStore((state) => state.setAction);
   const setFleet = useActionStore((state) => state.setFleet);
+  const includeGroundPlane = useActionStore((state) => state.includeGroundPlane);
+  const setIncludeGroundPlane = useActionStore((state) => state.setIncludeGroundPlane);
 
   const checkIsBig = () => {
     const a = areaData[0].lat - areaData[1].lat;
@@ -426,6 +428,16 @@ function App() {
       <Modal isOpen={isExportModal} onClose={() => setIsExportModal(false)}>
         <Column gap="0.5rem">
           <Title>Export</Title>
+
+          <label css={css({ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "13px", color: "#374151", cursor: "pointer", userSelect: "none" })}>
+            <input
+              type="checkbox"
+              checked={includeGroundPlane}
+              onChange={(e) => setIncludeGroundPlane(e.target.checked)}
+              css={css({ width: "14px", height: "14px", cursor: "pointer", accentColor: "#007bff" })}
+            />
+            Include ground plane
+          </label>
 
           <Row gap="0.5rem">
             <Button isShow={true} onClick={exportFile}>

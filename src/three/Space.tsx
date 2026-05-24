@@ -14,6 +14,10 @@ const ROAD_MAT = new THREE.MeshStandardMaterial({ color: "#3d3d3d" });
 const PATH_MAT = new THREE.MeshStandardMaterial({ color: "#888888" });
 const BUILDING_MAT = new THREE.MeshStandardMaterial({ color: "#9da0a3" });
 const BUILDING_ACTIVE_MAT = new THREE.MeshStandardMaterial({ color: "#007bff" });
+// Opaque ground material used in GLB export
+const GROUND_MAT = new THREE.MeshStandardMaterial({ color: "#888888", roughness: 1, metalness: 0 });
+// Ghost version shown in the browser preview — same colour, barely visible
+const GROUND_PREVIEW_MAT = new THREE.MeshStandardMaterial({ color: "#888888", roughness: 1, metalness: 0, transparent: true, opacity: 0.15, depthWrite: false });
 
 function Building({
   shape,
@@ -530,6 +534,37 @@ function RoadMeshes() {
   );
 }
 
+function GroundPlane() {
+  const meshRef = useRef<THREE.Mesh>(null!);
+  const center = useAreaStore((state) => state.center);
+  const includeGroundPlane = useActionStore((state) => state.includeGroundPlane);
+
+  const { width, depth } = useMemo(() => {
+    const refLat = (center[0].lat + center[1].lat) / 2;
+    const dLng = Math.abs(center[0].lng - center[1].lng);
+    const dLat = Math.abs(center[0].lat - center[1].lat);
+    // +10% margin on each side → ×1.2 total
+    const w = dLng * scale * Math.cos((refLat * Math.PI) / 180) * 1.2;
+    const d = dLat * scale * 1.2;
+    return { width: w, depth: d };
+  }, [center]);
+
+  useEffect(() => {
+    if (!meshRef.current) return;
+    meshRef.current.userData.exportToGLB = true;
+    meshRef.current.userData.groundPlane = true;
+  }, []);
+
+  if (!includeGroundPlane) return null;
+
+  // BoxGeometry: width × 0.5 thick × depth, top face sits at y = 0
+  return (
+    <mesh ref={meshRef} position={[0, -0.25, 0]} material={GROUND_PREVIEW_MAT}>
+      <boxGeometry args={[width, 0.5, depth]} />
+    </mesh>
+  );
+}
+
 export function Export() {
   const { scene } = useThree();
   const action = useActionStore((state) => state.action);
@@ -565,7 +600,12 @@ export function Export() {
     const exportRoot = new THREE.Group();
     scene.traverse((child) => {
       if (child.userData?.exportToGLB === true) {
-        exportRoot.add(child.clone(true));
+        const clone = child.clone(true);
+        // Swap preview material → opaque export material on the ground plane
+        if (child.userData?.groundPlane === true && clone instanceof THREE.Mesh) {
+          clone.material = GROUND_MAT;
+        }
+        exportRoot.add(clone);
       }
     });
     const exporter = new GLTFExporter();
@@ -635,6 +675,7 @@ export function Space() {
     <Canvas camera={{ fov: 90, near: 0.1, far: 7000 }}>
       <ambientLight intensity={Math.PI / 2} />
       <spotLight position={[10, 10, 10]} angle={0.15} penumbra={1} decay={0} intensity={Math.PI} />
+      <GroundPlane />
       <RoadMeshes />
       {buildingsData.map((item, index) => (
         <Building
