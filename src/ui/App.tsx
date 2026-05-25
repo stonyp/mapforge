@@ -207,7 +207,33 @@ function App() {
       },
     });
 
-    const query = `[out:json][timeout:25];(way["building"](${south},${west},${north},${east});relation["building"](${south},${west},${north},${east});way["highway"](${south},${west},${north},${east}););out body geom;`;
+    const bbox = `${south},${west},${north},${east}`;
+    const query = `[out:json][timeout:60];(` +
+      // ── existing ──────────────────────────────────────
+      `way["building"](${bbox});` +
+      `relation["building"](${bbox});` +
+      `way["highway"](${bbox});` +
+      // ── water ─────────────────────────────────────────
+      `way["natural"="water"](${bbox});` +
+      `relation["natural"="water"](${bbox});` +
+      `way["waterway"="river"](${bbox});` +
+      `way["waterway"="stream"](${bbox});` +
+      `way["waterway"="canal"](${bbox});` +
+      `way["waterway"="dam"](${bbox});` +
+      `way["natural"="coastline"](${bbox});` +
+      // ── vegetation / green space ───────────────────────
+      `way["natural"="wood"](${bbox});` +
+      `relation["natural"="wood"](${bbox});` +
+      `way["landuse"="forest"](${bbox});` +
+      `relation["landuse"="forest"](${bbox});` +
+      `way["landuse"="grass"](${bbox});` +
+      `way["leisure"="park"](${bbox});` +
+      `relation["leisure"="park"](${bbox});` +
+      `way["natural"="beach"](${bbox});` +
+      // ── infrastructure ────────────────────────────────
+      `way["railway"="rail"](${bbox});` +
+      `way["landuse"="parking"](${bbox});` +
+    `);out body geom;`;
     try {
       const response = await fetch("https://overpass-api.de/api/interpreter", {
         method: "POST",
@@ -234,6 +260,29 @@ function App() {
           tags: el.tags,
           geometry: el.geometry.map((pt: any) => ({ lat: pt.lat, lon: pt.lon })),
         }));
+
+      // ── Feature counts for console survey ─────────────────────────────────────
+      const els = data.elements as any[];
+      const count = (pred: (el: any) => boolean) => els.filter(pred).length;
+      console.group("OSM Features Available:");
+      console.log(`  buildings:      ${count((e) => !!e.tags?.building)}`);
+      console.log(`  roads/paths:    ${count((e) => !!e.tags?.highway)}`);
+      console.log(`  bridges:        ${count((e) => !!e.tags?.highway && e.tags?.bridge === "yes")}`);
+      console.log(`  railways:       ${count((e) => e.tags?.railway === "rail")}`);
+      console.log(`  water polygons: ${count((e) => e.tags?.natural === "water")}`);
+      console.log(`  rivers:         ${count((e) => e.tags?.waterway === "river")}`);
+      console.log(`  streams:        ${count((e) => e.tags?.waterway === "stream")}`);
+      console.log(`  canals:         ${count((e) => e.tags?.waterway === "canal")}`);
+      console.log(`  dams:           ${count((e) => e.tags?.waterway === "dam")}`);
+      console.log(`  coastline:      ${count((e) => e.tags?.natural === "coastline")}`);
+      console.log(`  forests/woods:  ${count((e) => e.tags?.natural === "wood" || e.tags?.landuse === "forest")}`);
+      console.log(`  grass:          ${count((e) => e.tags?.landuse === "grass")}`);
+      console.log(`  parks:          ${count((e) => e.tags?.leisure === "park")}`);
+      console.log(`  beaches:        ${count((e) => e.tags?.natural === "beach")}`);
+      console.log(`  parking lots:   ${count((e) => e.tags?.landuse === "parking")}`);
+      console.log(`  ─────────────────────────────`);
+      console.log(`  total elements: ${els.length}`);
+      console.groupEnd();
 
       setBuildings(blds);
       appendAreas(blds);
