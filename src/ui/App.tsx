@@ -15,6 +15,7 @@ import { Building } from "@/components/map/Processing";
 import { ChevronLeft, ChevronRight, Download, Loader2, Search } from "lucide-react";
 import L from "leaflet";
 import { useAreaStore } from "@/state/areaStore";
+import type { PolygonRing, PolylineElem } from "@/state/areaStore";
 import { useActionStore } from "@/state/exportStore";
 import { Modal } from "@/components/modal/Modal";
 import { TopNav } from "@/components/nav/TopNav";
@@ -31,6 +32,44 @@ const spinAnimation = keyframes`
 from { transform: rotate(0deg); }
 to { transform: rotate(360deg); }
 `;
+
+// ── OSM polygon helpers ────────────────────────────────────────────────────────
+
+/**
+ * Given an OSM element (way or relation), return one or more closed rings
+ * of lat/lon points representing its outer boundary.
+ *
+ * - Way: geometry is directly on the element.
+ * - Relation: outer boundary lives in members with role="outer".
+ */
+function extractOuterRings(el: any): Array<Array<{ lat: number; lon: number }>> {
+  if (el.type === "way" && el.geometry?.length >= 3) {
+    return [el.geometry.map((pt: any) => ({ lat: pt.lat, lon: pt.lon }))];
+  }
+  if (el.type === "relation" && Array.isArray(el.members)) {
+    return el.members
+      .filter((m: any) => m.role === "outer" && m.geometry?.length >= 3)
+      .map((m: any) => m.geometry.map((pt: any) => ({ lat: pt.lat, lon: pt.lon })));
+  }
+  return [];
+}
+
+/**
+ * Converts a list of OSM elements into flat PolygonRing items.
+ * Each ring gets a unique key from element id + ring index.
+ */
+function toPolygonRings(els: any[]): PolygonRing[] {
+  const out: PolygonRing[] = [];
+  for (const el of els) {
+    const rings = extractOuterRings(el);
+    rings.forEach((ring, ri) => {
+      out.push({ key: `${el.id}-${ri}`, ring, tags: el.tags ?? {} });
+    });
+  }
+  return out;
+}
+
+// ── ──────────────────────────────────────────────────────────────────────────
 
 const BOX_HALF_LAT: Record<"small" | "medium" | "large", number> = {
   small: 0.0018,
@@ -71,6 +110,12 @@ function App() {
   const setCenter = useAreaStore((state) => state.setCenter);
   const appendAreas = useAreaStore((state) => state.appendAreas);
   const setRoads = useAreaStore((state) => state.setRoads);
+  const setParks = useAreaStore((state) => state.setParks);
+  const setWaterPolygons = useAreaStore((state) => state.setWaterPolygons);
+  const setRivers = useAreaStore((state) => state.setRivers);
+  const setStreams = useAreaStore((state) => state.setStreams);
+  const setForests = useAreaStore((state) => state.setForests);
+  const setRailways = useAreaStore((state) => state.setRailways);
   const setProjection = useAreaStore((state) => state.setProjection);
   const setAction = useActionStore((state) => state.setAction);
   const setFleet = useActionStore((state) => state.setFleet);
@@ -227,6 +272,7 @@ function App() {
       `way["landuse"="forest"](${bbox});` +
       `relation["landuse"="forest"](${bbox});` +
       `way["landuse"="grass"](${bbox});` +
+      `way["natural"="grassland"](${bbox});` +
       `way["leisure"="park"](${bbox});` +
       `relation["leisure"="park"](${bbox});` +
       `way["natural"="beach"](${bbox});` +
@@ -261,6 +307,62 @@ function App() {
           geometry: el.geometry.map((pt: any) => ({ lat: pt.lat, lon: pt.lon })),
         }));
 
+      // ── Phase 1: Parks (leisure=park + landuse=grass + natural=grassland) ──
+      const parkElems = data.elements.filter(
+        (el: any) =>
+          el.tags?.leisure === "park" ||
+          el.tags?.landuse === "grass" ||
+          el.tags?.natural === "grassland"
+      );
+      const parsedParks: PolygonRing[] = toPolygonRings(parkElems);
+
+      // ── Phase 1: Water polygons (natural=water) ──────────────────────────
+      const waterPolyElems = data.elements.filter(
+        (el: any) => el.tags?.natural === "water"
+      );
+      const parsedWaterPolygons: PolygonRing[] = toPolygonRings(waterPolyElems);
+
+      // ── Phase 2: Rivers (waterway=river|canal) ────────────────────────────
+      const riverElems: PolylineElem[] = data.elements
+        .filter(
+          (el: any) =>
+            (el.tags?.waterway === "river" || el.tags?.waterway === "canal") &&
+            el.geometry?.length >= 2
+        )
+        .map((el: any) => ({
+          id: el.id,
+          tags: el.tags,
+          geometry: el.geometry.map((pt: any) => ({ lat: pt.lat, lon: pt.lon })),
+        }));
+
+      // ── Phase 2: Streams ──────────────────────────────────────────────────
+      const streamElems: PolylineElem[] = data.elements
+        .filter(
+          (el: any) => el.tags?.waterway === "stream" && el.geometry?.length >= 2
+        )
+        .map((el: any) => ({
+          id: el.id,
+          tags: el.tags,
+          geometry: el.geometry.map((pt: any) => ({ lat: pt.lat, lon: pt.lon })),
+        }));
+
+      // ── Phase 3: Forests (natural=wood + landuse=forest) ─────────────────
+      const forestElems = data.elements.filter(
+        (el: any) => el.tags?.natural === "wood" || el.tags?.landuse === "forest"
+      );
+      const parsedForests: PolygonRing[] = toPolygonRings(forestElems);
+
+      // ── Phase 4: Railways ─────────────────────────────────────────────────
+      const railwayElems: PolylineElem[] = data.elements
+        .filter(
+          (el: any) => el.tags?.railway === "rail" && el.geometry?.length >= 2
+        )
+        .map((el: any) => ({
+          id: el.id,
+          tags: el.tags,
+          geometry: el.geometry.map((pt: any) => ({ lat: pt.lat, lon: pt.lon })),
+        }));
+
       // ── Feature counts for console survey ─────────────────────────────────────
       const els = data.elements as any[];
       const count = (pred: (el: any) => boolean) => els.filter(pred).length;
@@ -287,6 +389,12 @@ function App() {
       setBuildings(blds);
       appendAreas(blds);
       setRoads(rdElems);
+      setParks(parsedParks);
+      setWaterPolygons(parsedWaterPolygons);
+      setRivers(riverElems);
+      setStreams(streamElems);
+      setForests(parsedForests);
+      setRailways(railwayElems);
       setHasFetchedBuildings(true);
 
       clearInterval(progressIntervalRef.current!);

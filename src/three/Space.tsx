@@ -17,6 +17,29 @@ const GROUND_MAT = new THREE.MeshStandardMaterial({ color: "#888888", roughness:
 // Ghost version shown in the browser preview — same colour, barely visible
 const GROUND_PREVIEW_MAT = new THREE.MeshStandardMaterial({ color: "#888888", roughness: 1, metalness: 0, transparent: true, opacity: 0.15, depthWrite: false });
 
+// ── New feature materials ──────────────────────────────────────────────────
+const PARK_MAT    = new THREE.MeshStandardMaterial({ color: "#4a7c59", roughness: 1, metalness: 0 });
+const WATER_MAT   = new THREE.MeshStandardMaterial({ color: "#2c5f7a", roughness: 0.3, metalness: 0 });
+const FOREST_MAT  = new THREE.MeshStandardMaterial({ color: "#2d5a27", roughness: 1, metalness: 0 });
+const RAILWAY_MAT = new THREE.MeshStandardMaterial({ color: "#2a2a2a", roughness: 1, metalness: 0 });
+const PILLAR_MAT  = new THREE.MeshStandardMaterial({ color: "#5a5a5a", roughness: 0.8, metalness: 0 });
+
+// ── Y offsets (scene units) ────────────────────────────────────────────────
+const BRIDGE_Y           =  3.0;
+const PARK_Y             = -0.02;
+const WATER_POLYGON_Y    = -0.05;
+const WATER_RIBBON_Y     = -0.04;
+const FOREST_Y           = -0.01;
+const RAILWAY_Y          =  0.02;
+
+// ── Polyline half-widths for new ribbon features ───────────────────────────
+const RIVER_HALF_WIDTH   = 4.0;
+const STREAM_HALF_WIDTH  = 1.0;
+const RAILWAY_HALF_WIDTH = 0.8;
+
+// ── Flat extrude settings (thin slab for ground-level polygons) ────────────
+const FLAT_EXTRUDE = { steps: 1, depth: 0.05, bevelEnabled: false } as const;
+
 function Building({
   shape,
   extrudeSettings,
@@ -388,6 +411,30 @@ function buildRoadShape(pts: THREE.Vector2[], halfW: number): THREE.Shape | null
 
 const ROAD_EXTRUDE = { steps: 1, depth: 0.1, bevelEnabled: false } as const;
 
+// ── Polygon ring → THREE.Shape ─────────────────────────────────────────────
+
+import type { PolygonRing, PolylineElem } from "@/state/areaStore";
+
+/**
+ * Projects a PolygonRing into a THREE.Shape.
+ * Returns null if the ring has fewer than 3 points.
+ */
+function buildPolygonShape(
+  ring: PolygonRing["ring"],
+  refLat: number,
+  refLng: number,
+  scaleX: number,
+  scaleY: number
+): THREE.Shape | null {
+  if (ring.length < 3) return null;
+  const pts = ring.map((pt) => new THREE.Vector2(
+    (pt.lon - refLng) * scaleX,
+    (pt.lat - refLat) * scaleY,
+  ));
+  if (!pts[0].equals(pts[pts.length - 1])) pts.push(pts[0]);
+  return new THREE.Shape(pts);
+}
+
 // ── Polyline clipping ─────────────────────────────────────────────────────────
 
 /**
@@ -472,14 +519,63 @@ function clipPolylineToBbox(
   return result;
 }
 
-function RoadMesh({ shape, material }: { shape: THREE.Shape; material: THREE.MeshStandardMaterial }) {
+function RoadMesh({
+  shape,
+  material,
+  yPos = 0,
+}: {
+  shape: THREE.Shape;
+  material: THREE.MeshStandardMaterial;
+  yPos?: number;
+}) {
   const meshRef = useRef<THREE.Mesh>(null!);
   useEffect(() => {
     meshRef.current.userData.exportToGLB = true;
   }, []);
   return (
-    <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]} material={material}>
+    <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, yPos, 0]} material={material}>
       <extrudeGeometry args={[shape, ROAD_EXTRUDE]} />
+    </mesh>
+  );
+}
+
+// ── Bridge support pillar ──────────────────────────────────────────────────
+
+function BridgePillar({ cx, cz }: { cx: number; cz: number }) {
+  const meshRef = useRef<THREE.Mesh>(null!);
+  useEffect(() => {
+    meshRef.current.userData.exportToGLB = true;
+  }, []);
+  // Pillar spans from y=0 to y=BRIDGE_Y; positioned at centroid of road ribbon.
+  return (
+    <mesh
+      ref={meshRef}
+      position={[cx, BRIDGE_Y / 2, cz]}
+      material={PILLAR_MAT}
+    >
+      <boxGeometry args={[0.6, BRIDGE_Y, 0.6]} />
+    </mesh>
+  );
+}
+
+// ── Flat polygon mesh (parks, water, forests) ──────────────────────────────
+
+function FlatPolygonMesh({
+  shape,
+  material,
+  yPos,
+}: {
+  shape: THREE.Shape;
+  material: THREE.MeshStandardMaterial;
+  yPos: number;
+}) {
+  const meshRef = useRef<THREE.Mesh>(null!);
+  useEffect(() => {
+    meshRef.current.userData.exportToGLB = true;
+  }, []);
+  return (
+    <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, yPos, 0]} material={material}>
+      <extrudeGeometry args={[shape, FLAT_EXTRUDE]} />
     </mesh>
   );
 }
@@ -488,7 +584,7 @@ function RoadMeshes() {
   const roads = useAreaStore((state) => state.roads);
   const projection = useAreaStore((state) => state.projection);
 
-  const roadShapes = useMemo(() => {
+  const roadItems = useMemo(() => {
     if (!projection) return [];
     const { refLat, refLng, scaleX, scaleY, bbox } = projection;
     return roads.flatMap((road, i) => {
@@ -496,6 +592,8 @@ function RoadMeshes() {
       const highwayType: string = road.tags?.highway ?? "";
       const halfW = ROAD_HALF_WIDTH[highwayType] ?? DEFAULT_ROAD_HALF_WIDTH;
       const material = PEDESTRIAN_TYPES.has(highwayType) ? PATH_MAT : ROAD_MAT;
+      const isBridge = road.tags?.bridge === "yes";
+      const yPos = isBridge ? BRIDGE_Y : 0;
 
       const clippedChains = clipPolylineToBbox(
         road.geometry as LatLon[],
@@ -509,15 +607,178 @@ function RoadMeshes() {
         ));
         const shape = buildRoadShape(pts2d, halfW);
         if (!shape) return [];
-        return [{ shape, material, key: `${road.id ?? i}-${ci}` }];
+
+        // Pillar centroid: average of 2-D ribbon points.
+        // In the mesh's local frame (rotated -90° around X), the scene-space
+        // X maps to pts2d.x and scene-space Z maps to -pts2d.y.
+        const cx = pts2d.reduce((s, p) => s + p.x, 0) / pts2d.length;
+        const cz = -(pts2d.reduce((s, p) => s + p.y, 0) / pts2d.length);
+
+        return [{ shape, material, yPos, isBridge, cx, cz, key: `${road.id ?? i}-${ci}` }];
       });
     });
   }, [roads, projection]);
 
   return (
     <>
-      {roadShapes.map(({ shape, material, key }) => (
-        <RoadMesh key={key} shape={shape} material={material} />
+      {roadItems.map(({ shape, material, yPos, isBridge, cx, cz, key }) => (
+        <group key={key}>
+          <RoadMesh shape={shape} material={material} yPos={yPos} />
+          {isBridge && <BridgePillar cx={cx} cz={cz} />}
+        </group>
+      ))}
+    </>
+  );
+}
+
+// ── Parks + grass ──────────────────────────────────────────────────────────
+
+function GreenMeshes() {
+  const parks = useAreaStore((state) => state.parks);
+  const projection = useAreaStore((state) => state.projection);
+
+  const shapes = useMemo(() => {
+    if (!projection) return [];
+    const { refLat, refLng, scaleX, scaleY } = projection;
+    return parks.flatMap(({ key, ring }) => {
+      const shape = buildPolygonShape(ring, refLat, refLng, scaleX, scaleY);
+      if (!shape) return [];
+      return [{ shape, key }];
+    });
+  }, [parks, projection]);
+
+  return (
+    <>
+      {shapes.map(({ shape, key }) => (
+        <FlatPolygonMesh key={key} shape={shape} material={PARK_MAT} yPos={PARK_Y} />
+      ))}
+    </>
+  );
+}
+
+// ── Water polygons ─────────────────────────────────────────────────────────
+
+function WaterPolygonMeshes() {
+  const waterPolygons = useAreaStore((state) => state.waterPolygons);
+  const projection = useAreaStore((state) => state.projection);
+
+  const shapes = useMemo(() => {
+    if (!projection) return [];
+    const { refLat, refLng, scaleX, scaleY } = projection;
+    return waterPolygons.flatMap(({ key, ring }) => {
+      const shape = buildPolygonShape(ring, refLat, refLng, scaleX, scaleY);
+      if (!shape) return [];
+      return [{ shape, key }];
+    });
+  }, [waterPolygons, projection]);
+
+  return (
+    <>
+      {shapes.map(({ shape, key }) => (
+        <FlatPolygonMesh key={key} shape={shape} material={WATER_MAT} yPos={WATER_POLYGON_Y} />
+      ))}
+    </>
+  );
+}
+
+// ── Rivers + streams (ribbon mesh) ────────────────────────────────────────
+
+function WaterRibbonMeshes() {
+  const rivers = useAreaStore((state) => state.rivers);
+  const streams = useAreaStore((state) => state.streams);
+  const projection = useAreaStore((state) => state.projection);
+
+  const shapes = useMemo(() => {
+    if (!projection) return [];
+    const { refLat, refLng, scaleX, scaleY, bbox } = projection;
+
+    const process = (elems: PolylineElem[], halfW: number) =>
+      elems.flatMap((el, i) => {
+        const clipped = clipPolylineToBbox(
+          el.geometry as LatLon[],
+          bbox.minLat, bbox.maxLat, bbox.minLng, bbox.maxLng
+        );
+        return clipped.flatMap((chain, ci) => {
+          const pts2d = chain.map((pt) => new THREE.Vector2(
+            (pt.lon - refLng) * scaleX,
+            (pt.lat - refLat) * scaleY,
+          ));
+          const shape = buildRoadShape(pts2d, halfW);
+          if (!shape) return [];
+          return [{ shape, key: `${el.id ?? i}-${ci}` }];
+        });
+      });
+
+    return [
+      ...process(rivers, RIVER_HALF_WIDTH),
+      ...process(streams, STREAM_HALF_WIDTH),
+    ];
+  }, [rivers, streams, projection]);
+
+  return (
+    <>
+      {shapes.map(({ shape, key }) => (
+        <RoadMesh key={key} shape={shape} material={WATER_MAT} yPos={WATER_RIBBON_Y} />
+      ))}
+    </>
+  );
+}
+
+// ── Forests ────────────────────────────────────────────────────────────────
+
+function ForestMeshes() {
+  const forests = useAreaStore((state) => state.forests);
+  const projection = useAreaStore((state) => state.projection);
+
+  const shapes = useMemo(() => {
+    if (!projection) return [];
+    const { refLat, refLng, scaleX, scaleY } = projection;
+    return forests.flatMap(({ key, ring }) => {
+      const shape = buildPolygonShape(ring, refLat, refLng, scaleX, scaleY);
+      if (!shape) return [];
+      return [{ shape, key }];
+    });
+  }, [forests, projection]);
+
+  return (
+    <>
+      {shapes.map(({ shape, key }) => (
+        <FlatPolygonMesh key={key} shape={shape} material={FOREST_MAT} yPos={FOREST_Y} />
+      ))}
+    </>
+  );
+}
+
+// ── Railways ───────────────────────────────────────────────────────────────
+
+function RailwayMeshes() {
+  const railways = useAreaStore((state) => state.railways);
+  const projection = useAreaStore((state) => state.projection);
+
+  const shapes = useMemo(() => {
+    if (!projection) return [];
+    const { refLat, refLng, scaleX, scaleY, bbox } = projection;
+    return railways.flatMap((el, i) => {
+      const clipped = clipPolylineToBbox(
+        el.geometry as LatLon[],
+        bbox.minLat, bbox.maxLat, bbox.minLng, bbox.maxLng
+      );
+      return clipped.flatMap((chain, ci) => {
+        const pts2d = chain.map((pt) => new THREE.Vector2(
+          (pt.lon - refLng) * scaleX,
+          (pt.lat - refLat) * scaleY,
+        ));
+        const shape = buildRoadShape(pts2d, RAILWAY_HALF_WIDTH);
+        if (!shape) return [];
+        return [{ shape, key: `rail-${el.id ?? i}-${ci}` }];
+      });
+    });
+  }, [railways, projection]);
+
+  return (
+    <>
+      {shapes.map(({ shape, key }) => (
+        <RoadMesh key={key} shape={shape} material={RAILWAY_MAT} yPos={RAILWAY_Y} />
       ))}
     </>
   );
@@ -673,6 +934,11 @@ export function Space() {
       <ambientLight intensity={Math.PI / 2} />
       <spotLight position={[10, 10, 10]} angle={0.15} penumbra={1} decay={0} intensity={Math.PI} />
       <GroundPlane sceneWidth={groundSceneWidth} sceneDepth={groundSceneDepth} />
+      <GreenMeshes />
+      <WaterPolygonMeshes />
+      <ForestMeshes />
+      <WaterRibbonMeshes />
+      <RailwayMeshes />
       <RoadMeshes />
       {buildingsData.map((item, index) => (
         <Building
