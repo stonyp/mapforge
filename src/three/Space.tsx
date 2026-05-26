@@ -415,23 +415,134 @@ const ROAD_EXTRUDE = { steps: 1, depth: 0.1, bevelEnabled: false } as const;
 
 import type { PolygonRing, PolylineElem } from "@/state/areaStore";
 
+type BBox = { minLat: number; maxLat: number; minLng: number; maxLng: number };
+
 /**
- * Projects a PolygonRing into a THREE.Shape.
- * Returns null if the ring has fewer than 3 points.
+ * Sutherland-Hodgman polygon clip against an axis-aligned lat/lon bbox.
+ * Clips the ring against each of the 4 half-planes in turn.
+ * Returns null if the clipped result has fewer than 3 vertices.
  */
-function buildPolygonShape(
+function clipPolygonRingToBbox(
+  ring: Array<{ lat: number; lon: number }>,
+  minLat: number, maxLat: number,
+  minLng: number, maxLng: number
+): Array<{ lat: number; lon: number }> | null {
+  const lerp = (
+    a: { lat: number; lon: number },
+    b: { lat: number; lon: number },
+    t: number
+  ) => ({ lat: a.lat + t * (b.lat - a.lat), lon: a.lon + t * (b.lon - a.lon) });
+
+  type Plane = {
+    inside: (p: { lat: number; lon: number }) => boolean;
+    intersect: (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => { lat: number; lon: number };
+  };
+
+  const planes: Plane[] = [
+    // left: lon >= minLng
+    { inside: (p) => p.lon >= minLng, intersect: (a, b) => lerp(a, b, (minLng - a.lon) / (b.lon - a.lon)) },
+    // right: lon <= maxLng
+    { inside: (p) => p.lon <= maxLng, intersect: (a, b) => lerp(a, b, (maxLng - a.lon) / (b.lon - a.lon)) },
+    // bottom: lat >= minLat
+    { inside: (p) => p.lat >= minLat, intersect: (a, b) => lerp(a, b, (minLat - a.lat) / (b.lat - a.lat)) },
+    // top: lat <= maxLat
+    { inside: (p) => p.lat <= maxLat, intersect: (a, b) => lerp(a, b, (maxLat - a.lat) / (b.lat - a.lat)) },
+  ];
+
+  // Remove closing duplicate point if present before processing.
+  let poly = ring.slice();
+  if (poly.length > 1) {
+    const first = poly[0];
+    const last = poly[poly.length - 1];
+    if (Math.abs(first.lat - last.lat) < 1e-10 && Math.abs(first.lon - last.lon) < 1e-10) {
+      poly = poly.slice(0, -1);
+    }
+  }
+
+  for (const plane of planes) {
+    if (poly.length === 0) return null;
+    const input = poly;
+    poly = [];
+    for (let i = 0; i < input.length; i++) {
+      const a = input[i];
+      const b = input[(i + 1) % input.length];
+      const aIn = plane.inside(a);
+      const bIn = plane.inside(b);
+      if (aIn) {
+        poly.push(a);
+        if (!bIn) poly.push(plane.intersect(a, b));
+      } else if (bIn) {
+        poly.push(plane.intersect(a, b));
+      }
+    }
+  }
+
+  return poly.length >= 3 ? poly : null;
+}
+
+/**
+ * Projects a polygon ring into a THREE.Shape, applying bbox clipping as needed.
+ *
+ * Strategy:
+ *  - If the ring's span exceeds 50 % of the bbox in either dimension → clip to bbox
+ *    (handles large water bodies / parks that cross the selection boundary).
+ *  - Otherwise, if the ring's centroid lies outside the bbox → skip entirely.
+ *  - Otherwise → project as-is.
+ *
+ * Returns null to indicate "skip this ring".
+ */
+function buildPolygonShapeClipped(
   ring: PolygonRing["ring"],
   refLat: number,
   refLng: number,
   scaleX: number,
-  scaleY: number
+  scaleY: number,
+  bbox: BBox
 ): THREE.Shape | null {
   if (ring.length < 3) return null;
-  const pts = ring.map((pt) => new THREE.Vector2(
+
+  const { minLat, maxLat, minLng, maxLng } = bbox;
+  const bboxW = maxLng - minLng;
+  const bboxH = maxLat - minLat;
+
+  // Compute ring bounds and centroid in lat/lon space.
+  let rMinLat = Infinity, rMaxLat = -Infinity;
+  let rMinLng = Infinity, rMaxLng = -Infinity;
+  let sumLat = 0, sumLon = 0;
+  for (const pt of ring) {
+    if (pt.lat < rMinLat) rMinLat = pt.lat;
+    if (pt.lat > rMaxLat) rMaxLat = pt.lat;
+    if (pt.lon < rMinLng) rMinLng = pt.lon;
+    if (pt.lon > rMaxLng) rMaxLng = pt.lon;
+    sumLat += pt.lat;
+    sumLon += pt.lon;
+  }
+  const cLat = sumLat / ring.length;
+  const cLon = sumLon / ring.length;
+  const spanLat = rMaxLat - rMinLat;
+  const spanLng = rMaxLng - rMinLng;
+
+  const isLarge = spanLng > bboxW * 0.5 || spanLat > bboxH * 0.5;
+  const centroidInside =
+    cLat >= minLat && cLat <= maxLat && cLon >= minLng && cLon <= maxLng;
+
+  let workingRing: typeof ring;
+  if (isLarge) {
+    // Clip to bbox so the polygon doesn't extend far outside the scene.
+    const clipped = clipPolygonRingToBbox(ring, minLat, maxLat, minLng, maxLng);
+    if (!clipped || clipped.length < 3) return null;
+    workingRing = clipped;
+  } else if (centroidInside) {
+    workingRing = ring;
+  } else {
+    return null; // Small polygon whose centroid is outside — skip.
+  }
+
+  const pts = workingRing.map((pt) => new THREE.Vector2(
     (pt.lon - refLng) * scaleX,
     (pt.lat - refLat) * scaleY,
   ));
-  if (!pts[0].equals(pts[pts.length - 1])) pts.push(pts[0]);
+  if (!pts[0].equals(pts[pts.length - 1])) pts.push(pts[0].clone());
   return new THREE.Shape(pts);
 }
 
@@ -639,9 +750,9 @@ function GreenMeshes() {
 
   const shapes = useMemo(() => {
     if (!projection) return [];
-    const { refLat, refLng, scaleX, scaleY } = projection;
+    const { refLat, refLng, scaleX, scaleY, bbox } = projection;
     return parks.flatMap(({ key, ring }) => {
-      const shape = buildPolygonShape(ring, refLat, refLng, scaleX, scaleY);
+      const shape = buildPolygonShapeClipped(ring, refLat, refLng, scaleX, scaleY, bbox);
       if (!shape) return [];
       return [{ shape, key }];
     });
@@ -664,9 +775,9 @@ function WaterPolygonMeshes() {
 
   const shapes = useMemo(() => {
     if (!projection) return [];
-    const { refLat, refLng, scaleX, scaleY } = projection;
+    const { refLat, refLng, scaleX, scaleY, bbox } = projection;
     return waterPolygons.flatMap(({ key, ring }) => {
-      const shape = buildPolygonShape(ring, refLat, refLng, scaleX, scaleY);
+      const shape = buildPolygonShapeClipped(ring, refLat, refLng, scaleX, scaleY, bbox);
       if (!shape) return [];
       return [{ shape, key }];
     });
@@ -732,9 +843,9 @@ function ForestMeshes() {
 
   const shapes = useMemo(() => {
     if (!projection) return [];
-    const { refLat, refLng, scaleX, scaleY } = projection;
+    const { refLat, refLng, scaleX, scaleY, bbox } = projection;
     return forests.flatMap(({ key, ring }) => {
-      const shape = buildPolygonShape(ring, refLat, refLng, scaleX, scaleY);
+      const shape = buildPolygonShapeClipped(ring, refLat, refLng, scaleX, scaleY, bbox);
       if (!shape) return [];
       return [{ shape, key }];
     });
