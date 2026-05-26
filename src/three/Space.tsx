@@ -483,11 +483,18 @@ function clipPolygonRingToBbox(
 /**
  * Projects a polygon ring into a THREE.Shape, applying bbox clipping as needed.
  *
- * Strategy:
- *  - If the ring's span exceeds 50 % of the bbox in either dimension → clip to bbox
- *    (handles large water bodies / parks that cross the selection boundary).
- *  - Otherwise, if the ring's centroid lies outside the bbox → skip entirely.
- *  - Otherwise → project as-is.
+ * Strategy (AABB-based, no arbitrary thresholds):
+ *  1. Compute the ring's axis-aligned bounding box in lat/lon space.
+ *  2. If the ring's AABB doesn't intersect the scene bbox at all → skip.
+ *  3. If the ring's AABB is fully contained within the scene bbox → project as-is.
+ *  4. Otherwise (ring straddles or extends beyond the bbox) → clip with
+ *     Sutherland-Hodgman, then project the clipped result.
+ *
+ * This correctly handles:
+ *  - Small ponds fully inside bbox (path 3)
+ *  - River segments that partially overlap the bbox edge (path 4) — the case
+ *    that broke the old centroid/50%-span heuristic
+ *  - Features completely outside the selection (path 2, skipped)
  *
  * Returns null to indicate "skip this ring".
  */
@@ -502,40 +509,36 @@ function buildPolygonShapeClipped(
   if (ring.length < 3) return null;
 
   const { minLat, maxLat, minLng, maxLng } = bbox;
-  const bboxW = maxLng - minLng;
-  const bboxH = maxLat - minLat;
 
-  // Compute ring bounds and centroid in lat/lon space.
+  // Compute the ring's AABB in lat/lon space.
   let rMinLat = Infinity, rMaxLat = -Infinity;
   let rMinLng = Infinity, rMaxLng = -Infinity;
-  let sumLat = 0, sumLon = 0;
   for (const pt of ring) {
     if (pt.lat < rMinLat) rMinLat = pt.lat;
     if (pt.lat > rMaxLat) rMaxLat = pt.lat;
     if (pt.lon < rMinLng) rMinLng = pt.lon;
     if (pt.lon > rMaxLng) rMaxLng = pt.lon;
-    sumLat += pt.lat;
-    sumLon += pt.lon;
   }
-  const cLat = sumLat / ring.length;
-  const cLon = sumLon / ring.length;
-  const spanLat = rMaxLat - rMinLat;
-  const spanLng = rMaxLng - rMinLng;
 
-  const isLarge = spanLng > bboxW * 0.5 || spanLat > bboxH * 0.5;
-  const centroidInside =
-    cLat >= minLat && cLat <= maxLat && cLon >= minLng && cLon <= maxLng;
+  // 2. No overlap at all → skip.
+  const aabbOverlaps =
+    rMaxLng >= minLng && rMinLng <= maxLng &&
+    rMaxLat >= minLat && rMinLat <= maxLat;
+  if (!aabbOverlaps) return null;
+
+  // 3. Fully inside → project as-is (no clipping needed).
+  const fullyInside =
+    rMinLat >= minLat && rMaxLat <= maxLat &&
+    rMinLng >= minLng && rMaxLng <= maxLng;
 
   let workingRing: typeof ring;
-  if (isLarge) {
-    // Clip to bbox so the polygon doesn't extend far outside the scene.
+  if (fullyInside) {
+    workingRing = ring;
+  } else {
+    // 4. Ring extends outside bbox — clip it.
     const clipped = clipPolygonRingToBbox(ring, minLat, maxLat, minLng, maxLng);
     if (!clipped || clipped.length < 3) return null;
     workingRing = clipped;
-  } else if (centroidInside) {
-    workingRing = ring;
-  } else {
-    return null; // Small polygon whose centroid is outside — skip.
   }
 
   const pts = workingRing.map((pt) => new THREE.Vector2(
