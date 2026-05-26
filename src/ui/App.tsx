@@ -320,6 +320,52 @@ function App() {
       const waterPolyElems = data.elements.filter(
         (el: any) => el.tags?.natural === "water"
       );
+
+      // ── Diagnostic: water polygon extraction ─────────────────────────────
+      {
+        const waterWays = waterPolyElems.filter((e: any) => e.type === "way");
+        const waterRels = waterPolyElems.filter((e: any) => e.type === "relation");
+        console.group(`Water polygons diagnostic (${waterPolyElems.length} total)`);
+        console.log(`  ways:      ${waterWays.length}`);
+        console.log(`  relations: ${waterRels.length}`);
+
+        let relSucceeded = 0;
+        let relSkipped = 0;
+        for (const rel of waterRels) {
+          const members = Array.isArray(rel.members) ? rel.members : [];
+          const outerWithGeom  = members.filter((m: any) => m.role === "outer" && m.geometry?.length >= 3);
+          const outerNoGeom    = members.filter((m: any) => m.role === "outer" && !(m.geometry?.length >= 3));
+          const innerCount     = members.filter((m: any) => m.role === "inner").length;
+          const otherCount     = members.filter((m: any) => m.role !== "outer" && m.role !== "inner").length;
+
+          if (outerWithGeom.length > 0) {
+            relSucceeded++;
+          } else {
+            relSkipped++;
+          }
+
+          console.group(
+            `  relation ${rel.id} "${rel.tags?.name ?? "(unnamed)"}" — ` +
+            `outer: ${outerWithGeom.length} ok / ${outerNoGeom.length} no-geom, ` +
+            `inner: ${innerCount}, other-role: ${otherCount}`
+          );
+          if (outerNoGeom.length > 0) {
+            console.warn(`    ⚠ ${outerNoGeom.length} outer member(s) missing geometry:`,
+              outerNoGeom.map((m: any) => ({ ref: m.ref, role: m.role, geomLen: m.geometry?.length ?? 0 }))
+            );
+          }
+          if (members.length === 0) {
+            console.warn(`    ⚠ relation has no members at all — out body geom may not have returned member geometry`);
+          }
+          console.groupEnd();
+        }
+
+        console.log(`  ─────────────────────────────`);
+        console.log(`  relations succeeded (≥1 outer ring): ${relSucceeded}`);
+        console.log(`  relations skipped   (0 outer rings):  ${relSkipped}`);
+        console.groupEnd();
+      }
+
       const parsedWaterPolygons: PolygonRing[] = toPolygonRings(waterPolyElems);
 
       // ── Phase 2: Rivers (waterway=river|canal) ────────────────────────────
