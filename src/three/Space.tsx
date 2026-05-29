@@ -481,20 +481,35 @@ function clipPolygonRingToBbox(
 }
 
 /**
- * Projects a polygon ring into a THREE.Shape, applying bbox clipping as needed.
+ * Signed area of a 2-D polygon using the shoelace formula.
+ * Result > 0 → counter-clockwise (CCW).
+ * Result < 0 → clockwise (CW).
+ * The array must NOT contain a closing duplicate — wrap-around is handled via modulo.
+ */
+function signedArea2D(pts: THREE.Vector2[]): number {
+  const n = pts.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % n];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return area * 0.5;
+}
+
+/**
+ * Projects a polygon ring into a THREE.Shape, applying bbox clipping and
+ * winding-order correction as needed.
  *
  * Strategy (AABB-based, no arbitrary thresholds):
- *  1. Compute the ring's axis-aligned bounding box in lat/lon space.
- *  2. If the ring's AABB doesn't intersect the scene bbox at all → skip.
- *  3. If the ring's AABB is fully contained within the scene bbox → project as-is.
- *  4. Otherwise (ring straddles or extends beyond the bbox) → clip with
- *     Sutherland-Hodgman, then project the clipped result.
+ *  1. Compute the ring's AABB in lat/lon space.
+ *  2. AABB doesn't intersect scene bbox → skip (completely outside).
+ *  3. AABB fully inside scene bbox → project as-is (no clipping needed).
+ *  4. AABB partially overlaps → clip with Sutherland-Hodgman, then project.
  *
- * This correctly handles:
- *  - Small ponds fully inside bbox (path 3)
- *  - River segments that partially overlap the bbox edge (path 4) — the case
- *    that broke the old centroid/50%-span heuristic
- *  - Features completely outside the selection (path 2, skipped)
+ * After projection, the winding order is normalised to CCW using the shoelace
+ * formula. THREE.ShapeGeometry requires CCW outer rings; a CW ring is treated
+ * as a hole and triangulates to just edge slivers.
  *
  * Returns null to indicate "skip this ring".
  */
@@ -526,7 +541,7 @@ function buildPolygonShapeClipped(
     rMaxLat >= minLat && rMinLat <= maxLat;
   if (!aabbOverlaps) return null;
 
-  // 3. Fully inside → project as-is (no clipping needed).
+  // 3/4. Fully inside → project as-is; partially outside → clip first.
   const fullyInside =
     rMinLat >= minLat && rMaxLat <= maxLat &&
     rMinLng >= minLng && rMaxLng <= maxLng;
@@ -535,17 +550,30 @@ function buildPolygonShapeClipped(
   if (fullyInside) {
     workingRing = ring;
   } else {
-    // 4. Ring extends outside bbox — clip it.
     const clipped = clipPolygonRingToBbox(ring, minLat, maxLat, minLng, maxLng);
     if (!clipped || clipped.length < 3) return null;
     workingRing = clipped;
   }
 
+  // Project to scene coordinates.
   const pts = workingRing.map((pt) => new THREE.Vector2(
     (pt.lon - refLng) * scaleX,
     (pt.lat - refLat) * scaleY,
   ));
-  if (!pts[0].equals(pts[pts.length - 1])) pts.push(pts[0].clone());
+
+  // Strip any closing duplicate before the winding check so modulo wrap-around
+  // is correct (the shoelace formula must not double-count the closing edge).
+  if (pts.length > 1 && pts[0].distanceTo(pts[pts.length - 1]) < 1e-6) {
+    pts.pop();
+  }
+  if (pts.length < 3) return null;
+
+  // Normalise to CCW: THREE.ShapeGeometry triangulates CCW rings as filled
+  // faces; a CW outer ring is treated as a hole and produces only edge slivers.
+  if (signedArea2D(pts) < 0) pts.reverse();
+
+  // Re-close the path for THREE.Shape.
+  pts.push(pts[0].clone());
   return new THREE.Shape(pts);
 }
 
